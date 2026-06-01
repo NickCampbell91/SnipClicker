@@ -1,0 +1,33 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: py -m pip install -r requirements.txt
+
+      - name: Build executable
+        run: py -m PyInstaller --noconfirm --clean --onefile --windowed --noupx --icon=NONE --name SnipClicker app.py
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnipClicker-Windows
+          path: dist/SnipClicker.exe
