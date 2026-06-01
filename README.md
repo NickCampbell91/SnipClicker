@@ -39,16 +39,26 @@ The executable is created at:
 dist\SnipClicker.exe
 ```
 
+## Download
+
+Download the latest Windows executable from the GitHub Releases page:
+
+```text
+https://github.com/NickCampbell91/SnipClicker/releases
+```
+
 ## GitHub Build
 
 This repository includes a GitHub Actions workflow that builds a Windows executable automatically.
 
-After pushing to GitHub:
+Regular branch builds upload the executable as an Actions artifact. Version tags such as `v0.1.0` create a GitHub Release and attach `SnipClicker.exe` directly to that release.
 
-1. Open the repository on GitHub.
-2. Go to `Actions`.
-3. Run or open the latest `Build Windows EXE` workflow.
-4. Download the `SnipClicker-Windows` artifact.
+To make a release:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## Beta Notes
 
