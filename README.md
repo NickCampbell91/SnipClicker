@@ -36,7 +36,6 @@ https://github.com/NickCampbell91/SnipClicker
 - Start or stop scanning with a customizable global hotkey.
 - Delay clicks while the cursor is moving, then click once the cursor stops.
 - Return the cursor to its previous position after automated clicks.
-- Save diagnostics when repeated clicks suggest a target may not be clicking correctly.
 
 ## Basic Use
 

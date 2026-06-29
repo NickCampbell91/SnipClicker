@@ -4,7 +4,6 @@ import math
 import os
 import shutil
 import time
-import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,10 +22,8 @@ LEGACY_APP_NAME = "Clicker"
 DATA_DIR = Path(os.getenv("APPDATA", Path.home())) / APP_NAME
 LEGACY_DATA_DIR = Path(os.getenv("APPDATA", Path.home())) / LEGACY_APP_NAME
 TARGET_DIR = DATA_DIR / "targets"
-DIAGNOSTIC_DIR = DATA_DIR / "diagnostics"
 CONFIG_PATH = DATA_DIR / "targets.json"
 SETTINGS_PATH = DATA_DIR / "settings.json"
-LOG_PATH = DATA_DIR / "snipclicker.log"
 SCAN_INTERVAL_MS = 250
 DISAPPEAR_MARGIN = 0.08
 MOUSE_MOVE_TOLERANCE_PX = 2
@@ -39,7 +36,6 @@ CLICK_TYPES = ("Left", "Double", "Right")
 MAIN_PANEL_PADDING = 10
 MATCH_AREA_PADDING = 8
 CLICK_LOCATION_PADDING = 8
-REPEAT_DIAGNOSTIC_THRESHOLD = 5
 COLOR_VERIFY_THRESHOLD = 0.72
 COLOR_BG = "#0f141b"
 COLOR_PANEL = "#151c24"
@@ -155,8 +151,6 @@ class Target:
     last_status: str = "Idle"
     visible: bool = False
     last_center: Optional[tuple[int, int]] = None
-    repeat_click_count: int = 0
-    repeat_diagnostic_reported: bool = False
     template_cache: list[tuple[float, np.ndarray]] = field(default_factory=list, repr=False)
     template_cache_mode: Optional[bool] = field(default=None, repr=False)
     color_template_cache: Optional[np.ndarray] = field(default=None, repr=False)
@@ -201,14 +195,6 @@ def ensure_dirs() -> None:
     if not DATA_DIR.exists() and LEGACY_DATA_DIR.exists():
         shutil.copytree(LEGACY_DATA_DIR, DATA_DIR)
     TARGET_DIR.mkdir(parents=True, exist_ok=True)
-    DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def log_event(message: str) -> None:
-    ensure_dirs()
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    with LOG_PATH.open("a", encoding="utf-8") as log_file:
-        log_file.write(f"[{timestamp}] {message}\n")
 
 
 def load_targets() -> list[Target]:
@@ -926,8 +912,8 @@ class RegionSelector:
             self.escape_listener = keyboard.Listener(on_press=on_press)
             self.escape_listener.daemon = True
             self.escape_listener.start()
-        except Exception as exc:
-            log_event(f"Failed to start area cancel listener: {exc}")
+        except Exception:
+            pass
 
     def stop_escape_listener(self) -> None:
         if self.escape_listener:
@@ -1024,8 +1010,8 @@ class WindowSelector:
             self.escape_listener = keyboard.Listener(on_press=on_press)
             self.escape_listener.daemon = True
             self.escape_listener.start()
-        except Exception as exc:
-            log_event(f"Failed to start window cancel listener: {exc}")
+        except Exception:
+            pass
 
     def stop_escape_listener(self) -> None:
         if self.escape_listener:
@@ -1044,10 +1030,6 @@ class WindowSelector:
         def resolve() -> None:
             anchor = window_anchor_at_point(x, y)
             if anchor:
-                log_event(
-                    f"Selected window hwnd={anchor.hwnd} title={anchor.title!r} "
-                    f"class={anchor.class_name!r} rect={anchor.rect}"
-                )
                 self.on_selected(anchor)
             else:
                 self.on_cancel()
@@ -2198,7 +2180,6 @@ class ClickerApp:
         target.click_point = (round(min(1.0, max(0.0, x_ratio)), 4), round(min(1.0, max(0.0, y_ratio)), 4))
         save_targets(self.targets)
         self.update_details_panel()
-        log_event(f"Set click point for {target.name}: {target.click_point}")
 
     def reset_target_click_point(self) -> None:
         target = self.selected_target()
@@ -2207,7 +2188,6 @@ class ClickerApp:
         target.click_point = None
         save_targets(self.targets)
         self.update_details_panel()
-        log_event(f"Reset click point for {target.name} to center")
 
     def open_crop_editor(self) -> None:
         target = self.selected_target()
@@ -2250,8 +2230,6 @@ class ClickerApp:
         target.color_template_cache = None
         target.visible = False
         target.last_center = None
-        target.repeat_click_count = 0
-        target.repeat_diagnostic_reported = False
         self.thumbnail_refs.pop(target.id, None)
         self.tree.images.pop(target.id, None)
         self.tree.large_images = {
@@ -2262,7 +2240,6 @@ class ClickerApp:
         save_targets(self.targets)
         self._refresh_target_list()
         self.update_details_panel()
-        log_event(f"Cropped target {target.name}: {(left, top, right, bottom)} backup={backup_path}")
 
     def draw_search_area_preview(self, target: Optional[Target]) -> None:
         self.search_area_canvas.delete("all")
@@ -2362,11 +2339,9 @@ class ClickerApp:
             self.hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
             self.hotkey_listener.daemon = True
             self.hotkey_listener.start()
-            log_event(f"Started hotkey listener {hotkey_display(self.hotkey)}")
         except Exception as exc:
             self.hotkey_listener = None
             messagebox.showwarning(APP_NAME, f"Could not start the {hotkey_display(self.hotkey)} hotkey listener: {exc}")
-            log_event(f"Failed to start hotkey listener {hotkey_display(self.hotkey)}: {exc}")
 
     def stop_hotkey_listener(self) -> None:
         if self.hotkey_listener:
@@ -2374,7 +2349,6 @@ class ClickerApp:
             self.hotkey_listener = None
             self.hotkey_pressed_keys.clear()
             self.hotkey_triggered = False
-            log_event(f"Stopped hotkey listener {hotkey_display(self.hotkey)}")
 
     def capture_hotkey(self) -> None:
         self.stop_hotkey_listener()
@@ -2406,7 +2380,6 @@ class ClickerApp:
                 self.hotkey = tuple(sorted(keys, key=lambda key: {"ctrl": 0, "alt": 1, "shift": 2, "win": 3}.get(key, 10)))
                 save_hotkey(self.hotkey)
                 self.hotkey_var.set(hotkey_display(self.hotkey))
-                log_event(f"Set hotkey to {hotkey_display(self.hotkey)}")
             dialog.destroy()
 
         def cancel() -> None:
@@ -2465,13 +2438,6 @@ class ClickerApp:
         self.bound_window = anchor
         save_bound_window(anchor)
         self.update_bound_window_label()
-        if anchor:
-            log_event(
-                f"Bound window hwnd={anchor.hwnd} title={anchor.title!r} "
-                f"class={anchor.class_name!r} rect={anchor.rect}"
-            )
-        else:
-            log_event("Cleared bound window; scanning whole screen")
 
     def change_bound_window(self) -> None:
         self.area_preview.hide()
@@ -2802,11 +2768,6 @@ class ClickerApp:
                     self.tree.selection_set(target.id)
                     if search_region:
                         self.area_preview.show(search_region)
-                    log_event(
-                        f"Snipped target {dialog.result}: {region} "
-                        f"search_region={bool(search_region)} anchor={find_window_rect_for_anchor(anchor) or anchor.rect} "
-                        f"relative={search_region_relative}"
-                    )
 
             RegionSelector(self.root, apply_region, self.root.deiconify)
 
@@ -2823,14 +2784,11 @@ class ClickerApp:
             for target in self.targets:
                 target.visible = False
                 target.last_center = None
-                target.repeat_click_count = 0
-                target.repeat_diagnostic_reported = False
                 target.last_status = "Searching"
             self.start_button.set_text("Stop")
             self.start_button.set_variant("outline_danger")
             self.status_var.set("Searching")
             self.detail_var.set("Switch focus to the window you want scanned.")
-            log_event("Started scanning")
             self._refresh_target_list()
             self.root.after(100, self.scan_once)
         else:
@@ -2842,10 +2800,7 @@ class ClickerApp:
             for target in self.targets:
                 target.visible = False
                 target.last_center = None
-                target.repeat_click_count = 0
-                target.repeat_diagnostic_reported = False
                 target.last_status = "Idle"
-            log_event("Stopped scanning")
             self._refresh_target_list()
 
     def toggle_selected_target(self) -> None:
@@ -2855,8 +2810,6 @@ class ClickerApp:
         target.enabled = not target.enabled
         target.visible = False
         target.last_center = None
-        target.repeat_click_count = 0
-        target.repeat_diagnostic_reported = False
         if self.pending_click and self.pending_click["target_id"] == target.id:
             self.pending_click = None
         target.last_status = "Enabled" if target.enabled else "Disabled"
@@ -2889,13 +2842,7 @@ class ClickerApp:
                 target.search_window_handle = anchor.hwnd
                 target.visible = False
                 target.last_center = None
-                target.repeat_click_count = 0
-                target.repeat_diagnostic_reported = False
                 target.last_status = "Area selected"
-                log_event(
-                    f"Selected area for {target.name}: {region} "
-                    f"anchor={anchor_rect} relative={target.search_region_relative}"
-                )
                 self.root.deiconify()
                 self._save_and_refresh()
                 if not self.running:
@@ -2916,12 +2863,9 @@ class ClickerApp:
         target.search_window_handle = None
         target.visible = False
         target.last_center = None
-        target.repeat_click_count = 0
-        target.repeat_diagnostic_reported = False
         if self.pending_click and self.pending_click["target_id"] == target.id:
             self.pending_click = None
         target.last_status = "Full window"
-        log_event(f"Cleared area for {target.name}")
         self.area_preview.hide()
         self._save_and_refresh()
 
@@ -2987,7 +2931,6 @@ class ClickerApp:
             return
         self.delete_all_mode = True
         self.delete_button.set_text("Delete All")
-        log_event("Delete All armed by long press")
 
     def reset_delete_button(self) -> None:
         self.delete_all_mode = False
@@ -3041,7 +2984,6 @@ class ClickerApp:
             self.area_preview.hide()
             save_targets(self.targets)
             self._refresh_target_list()
-            log_event("Deleted all targets")
         finally:
             self.reset_delete_button()
 
@@ -3066,7 +3008,6 @@ class ClickerApp:
         except Exception as exc:
             self.status_var.set("Error")
             self.detail_var.set(str(exc))
-            log_event(f"Error: {exc}\n{traceback.format_exc()}")
 
         self._refresh_target_list()
         self.root.after(SCAN_INTERVAL_MS, self.scan_once)
@@ -3088,149 +3029,13 @@ class ClickerApp:
 
         click_x, click_y = self.pending_click["click_point"]
         click_point(click_x, click_y, self.pending_click["click_type"])
-        was_visible = target.visible
         target.last_center = self.pending_click["match_center"]
         target.last_confidence = self.pending_click["confidence"]
         target.last_status = "Clicked"
         target.visible = True
-        self.update_repeat_click_state(
-            target=target,
-            was_visible=was_visible,
-            confidence=self.pending_click["confidence"],
-            match_box=self.pending_click.get("match_box"),
-            capture_rect=self.pending_click.get("capture_rect"),
-            click_point_xy=(click_x, click_y),
-            capture_image=None,
-            pending=True,
-        )
         clicked_name = target.name
-        log_event(
-            f"Clicked pending {target.name} at {click_x},{click_y} "
-            f"type={self.pending_click['click_type']} confidence={self.pending_click['confidence']:.3f}"
-        )
         self.pending_click = None
         return clicked_name
-
-    def update_repeat_click_state(
-        self,
-        target: Target,
-        was_visible: bool,
-        confidence: float,
-        match_box: Optional[tuple[int, int, int, int]],
-        capture_rect: Optional[tuple[int, int, int, int]],
-        click_point_xy: tuple[int, int],
-        capture_image: Optional[Image.Image],
-        pending: bool,
-    ) -> None:
-        target.repeat_click_count = target.repeat_click_count + 1 if was_visible else 1
-        if target.repeat_click_count < REPEAT_DIAGNOSTIC_THRESHOLD:
-            target.repeat_diagnostic_reported = False
-            return
-        if target.repeat_diagnostic_reported:
-            return
-        target.repeat_diagnostic_reported = True
-        self.write_repeat_diagnostic(
-            target=target,
-            confidence=confidence,
-            match_box=match_box,
-            capture_rect=capture_rect,
-            click_point_xy=click_point_xy,
-            capture_image=capture_image,
-            pending=pending,
-        )
-
-    def write_repeat_diagnostic(
-        self,
-        target: Target,
-        confidence: float,
-        match_box: Optional[tuple[int, int, int, int]],
-        capture_rect: Optional[tuple[int, int, int, int]],
-        click_point_xy: tuple[int, int],
-        capture_image: Optional[Image.Image],
-        pending: bool,
-    ) -> None:
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        folder = DIAGNOSTIC_DIR / f"{timestamp}_{safe_filename(target.name)}"
-        folder.mkdir(parents=True, exist_ok=True)
-
-        template_size = None
-        try:
-            template = Image.open(target.image_path).convert("RGB")
-            template_size = template.size
-            template.save(folder / "template.png")
-        except OSError:
-            template = None
-
-        before_path = None
-        crop_path = None
-        if capture_image and match_box:
-            before = capture_image.convert("RGB")
-            draw = ImageDraw.Draw(before)
-            x, y, width, height = match_box
-            draw.rectangle((x, y, x + width, y + height), outline="red", width=3)
-            if capture_rect:
-                local_click = (click_point_xy[0] - capture_rect[0], click_point_xy[1] - capture_rect[1])
-                draw.line((local_click[0] - 8, local_click[1], local_click[0] + 8, local_click[1]), fill="yellow", width=2)
-                draw.line((local_click[0], local_click[1] - 8, local_click[0], local_click[1] + 8), fill="yellow", width=2)
-            before_path = "capture_before.png"
-            before.save(folder / before_path)
-            crop = capture_image.crop((
-                max(0, x - 24),
-                max(0, y - 24),
-                min(capture_image.width, x + width + 24),
-                min(capture_image.height, y + height + 24),
-            ))
-            crop_path = "match_crop_before.png"
-            crop.save(folder / crop_path)
-
-        after_path = None
-        if capture_rect:
-            try:
-                time.sleep(0.15)
-                after = ImageGrab.grab(bbox=capture_rect).convert("RGB")
-                after_path = "capture_after.png"
-                after.save(folder / after_path)
-            except (OSError, ValueError):
-                after_path = None
-
-        active_hwnd = user32.GetForegroundWindow()
-        payload = {
-            "timestamp": timestamp,
-            "reason": f"Target clicked {target.repeat_click_count} times in a row without being observed absent.",
-            "target": {
-                "id": target.id,
-                "name": target.name,
-                "threshold": target.threshold,
-                "confidence": confidence,
-                "click_type": target.click_type,
-                "custom_click_point": list(target.click_point) if target.click_point else None,
-                "repeat_click_count": target.repeat_click_count,
-                "pending_click": pending,
-                "template_size": list(template_size) if template_size else None,
-                "image_path": target.image_path,
-            },
-            "match": {
-                "match_box": list(match_box) if match_box else None,
-                "capture_rect": list(capture_rect) if capture_rect else None,
-                "capture_size": [capture_rect[2] - capture_rect[0], capture_rect[3] - capture_rect[1]] if capture_rect else None,
-                "click_point": list(click_point_xy),
-            },
-            "window": {
-                "bound_title": self.bound_window.title if self.bound_window else None,
-                "bound_class": self.bound_window.class_name if self.bound_window else None,
-                "bound_handle": self.bound_window.hwnd if self.bound_window else None,
-                "active_title": window_title(active_hwnd) if active_hwnd else "",
-                "active_class": window_class_name(active_hwnd) if active_hwnd else "",
-            },
-            "files": {
-                "template": "template.png" if template_size else None,
-                "capture_before": before_path,
-                "match_crop_before": crop_path,
-                "capture_after": after_path,
-            },
-        }
-        (folder / "diagnostic.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        log_event(f"Diagnostic saved for {target.name}: {folder}")
 
     def _scan_active_window(self) -> None:
         self.area_preview.hide()
@@ -3333,8 +3138,6 @@ class ClickerApp:
                     best_overall = target.last_confidence
                     target.visible = False
                     target.last_center = None
-                    target.repeat_click_count = 0
-                    target.repeat_diagnostic_reported = False
                     target.last_status = "Color mismatch"
                     self.detail_var.set(
                         f"Scans: {self.scan_count} | {target.name}: color {verified_color:.3f}, shape {confidence:.3f}"
@@ -3347,7 +3150,6 @@ class ClickerApp:
                 best_overall = confidence
             x, y, width, height = box
             center = (capture_rect[0] + x + width // 2, capture_rect[1] + y + height // 2)
-            was_visible = target.visible
             target.last_status = "Visible"
             click_x, click_y = click_point_for_match(capture_rect, box, target)
             target.last_center = center
@@ -3360,38 +3162,16 @@ class ClickerApp:
                     "click_point": (click_x, click_y),
                     "confidence": confidence,
                     "click_type": target.click_type,
-                    "match_box": box,
-                    "capture_rect": capture_rect,
                 }
                 target.last_status = "Pending"
                 clicked_name = f"Pending: {target.name}"
-                log_event(
-                    f"Pending {target.name} at {click_x},{click_y} "
-                    f"type={target.click_type} confidence={confidence:.3f}"
-                )
             else:
                 click_point(click_x, click_y, target.click_type)
                 target.last_status = "Clicked"
-                self.update_repeat_click_state(
-                    target=target,
-                    was_visible=was_visible,
-                    confidence=confidence,
-                    match_box=box,
-                    capture_rect=capture_rect,
-                    click_point_xy=(click_x, click_y),
-                    capture_image=capture_image,
-                    pending=False,
-                )
                 clicked_name = target.name
-                log_event(
-                    f"Clicked {target.name} at {click_x},{click_y} "
-                    f"type={target.click_type} confidence={confidence:.3f}"
-                )
         elif confidence < max(0.0, target.threshold - DISAPPEAR_MARGIN):
             target.visible = False
             target.last_center = None
-            target.repeat_click_count = 0
-            target.repeat_diagnostic_reported = False
             target.last_status = "Searching"
         else:
             target.last_status = "Near"
